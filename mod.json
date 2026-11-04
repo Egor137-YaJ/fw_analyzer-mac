@@ -1,0 +1,17 @@
+{
+	"geode": "5.11.2",
+	"gd": {
+		"win": "2.2081",
+		"android": "2.2081",
+		"mac": "2.2081",
+		"ios": "2.2081"
+	},
+	"id": "egor137.fw-analyzer",
+	"name": "FW Analyzer",
+	"version": "v1.0.0",
+	"developer": "egor137",
+	"description": "Automatic frame window analyzer",
+	"dependencies": {
+		"geode.node-ids": ">=v1.23.3"
+	}
+}
