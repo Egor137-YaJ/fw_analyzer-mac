@@ -7,6 +7,7 @@
 #include <span>
 #include <algorithm>
 #include <cstdlib>
+#include <cmath>
 #include <gdr/gdr.hpp>
 
 using namespace geode::prelude;
@@ -70,6 +71,7 @@ bool g_swap = false;
 bool g_human = false;
 bool g_verifying = false;
 bool g_isWave = true;
+bool g_waitStart = true;
 const int MIN_HORIZON = 30;
 int g_vshift = 0;
 Replay g_meta;
@@ -94,20 +96,24 @@ int playerFlags(PlayerObject* p) {
 
 State readState(GJBaseGameLayer* layer) {
 	State s;
-	s.x1 = layer->m_player1->m_position.x;
-	s.y1 = layer->m_player1->m_position.y;
+	s.x1 = layer->m_player1->getPositionX();
+	s.y1 = layer->m_player1->getPositionY();
 	s.vel1 = layer->m_player1->m_yVelocity;
 	s.flags1 = playerFlags(layer->m_player1);
-	s.x2 = layer->m_player2->m_position.x;
-	s.y2 = layer->m_player2->m_position.y;
+	s.x2 = layer->m_player2->getPositionX();
+	s.y2 = layer->m_player2->getPositionY();
 	s.vel2 = layer->m_player2->m_yVelocity;
 	s.flags2 = playerFlags(layer->m_player2);
 	return s;
 }
 
+bool near(double a, double b) {
+	return std::abs(a - b) < 0.01;
+}
+
 bool sameState(State a, State b) {
-	return a.x1 == b.x1 && a.y1 == b.y1 && a.vel1 == b.vel1 && a.flags1 == b.flags1
-		&& a.x2 == b.x2 && a.y2 == b.y2 && a.vel2 == b.vel2 && a.flags2 == b.flags2;
+	return near(a.x1, b.x1) && near(a.y1, b.y1) && near(a.vel1, b.vel1) && a.flags1 == b.flags1
+		&& near(a.x2, b.x2) && near(a.y2, b.y2) && near(a.vel2, b.vel2) && a.flags2 == b.flags2;
 }
 
 bool sortByFrame(gdr::Input<> const& a, gdr::Input<> const& b) {
@@ -727,7 +733,12 @@ class $modify(MyMenuLayer, MenuLayer) {
 
 class $modify(MyBaseLayer, GJBaseGameLayer) {
 	void processQueuedButtons(float dt, bool clearInputQueue) {
-		if (g_mode != 0 && PlayLayer::get() && !g_trialDone) {
+		if (g_mode != 0 && PlayLayer::get() && g_waitStart) {
+			if (m_gameState.m_currentProgress / 2 <= 2) {
+				g_waitStart = false;
+			}
+		}
+		if (g_mode != 0 && PlayLayer::get() && !g_trialDone && !g_waitStart) {
 			int tick = m_gameState.m_currentProgress / 2;
 			while (g_next < g_inputs.size() && (int)g_inputs[g_next].frame <= tick) {
 				auto input = g_inputs[g_next];
@@ -767,6 +778,8 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 					g_log << "trial click " << g_clickIndex << " shift " << g_shift << " ok (same state at " << tick << ")\n";
 					finishTrial(true);
 				} else if (g_phase == 0) {
+					State b = g_baseline[tick];
+					g_log << "diff tick " << tick << " x " << now.x1 << "/" << b.x1 << " y " << now.y1 << "/" << b.y1 << " vel " << now.vel1 << "/" << b.vel1 << " flags " << now.flags1 << "/" << b.flags1 << " p2 x " << now.x2 << "/" << b.x2 << " y " << now.y2 << "/" << b.y2 << " vel " << now.vel2 << "/" << b.vel2 << " flags " << now.flags2 << "/" << b.flags2 << "\n";
 					finishTrial(false);
 				}
 			}
@@ -777,9 +790,11 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 
 class $modify(MyPlayLayer, PlayLayer) {
 	void resetLevel() {
+		g_waitStart = true;
+		PlayLayer::resetLevel();
+
 		g_next = 0;
 		g_trialDone = false;
-		PlayLayer::resetLevel();
 	}
 
 	void destroyPlayer(PlayerObject* player, GameObject* object) {
