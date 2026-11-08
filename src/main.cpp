@@ -68,6 +68,8 @@ std::ofstream g_log;
 std::string g_name = "startfa1";
 bool g_swap = false;
 bool g_human = false;
+bool g_verifying = false;
+int g_vshift = 0;
 Replay g_meta;
 
 std::filesystem::path outDir() {
@@ -237,34 +239,6 @@ std::vector<Click> buildEvents() {
 	return events;
 }
 
-void buildClicks() {
-	std::vector<Click> events = buildEvents();
-	g_clicks.clear();
-	if (!g_human) {
-		g_clicks = events;
-	} else {
-		for (size_t i = 0; i < events.size(); i++) {
-			if (!events[i].down) {
-				continue;
-			}
-			Click c = events[i];
-			c.nextFrame = -1;
-			for (size_t j = i + 1; j < events.size(); j++) {
-				if (events[j].p2 == c.p2 && !events[j].down) {
-					for (size_t k = 0; k < events[j].idx.size(); k++) {
-						c.idx.push_back(events[j].idx[k]);
-					}
-					break;
-				}
-			}
-			g_clicks.push_back(c);
-		}
-	}
-	for (size_t i = 0; i < g_clicks.size(); i++) {
-		updateBounds(i);
-	}
-}
-
 void writeHumanMacro() {
 	Replay r = g_meta;
 	r.inputs = g_original;
@@ -309,14 +283,29 @@ void prepareTrialFor(Click c) {
 	g_limit = -1;
 	if (g_phase == 0) {
 		g_limit = std::max(frame, frame + g_shift) + RELEVANCE_TICKS;
-	} else if (!g_human && c.nextFrame >= 0) {
+	} else if (c.nextFrame >= 0) {
 		g_limit = std::max(frame + g_shift + 2, c.nextFrame - std::abs(g_shift) - 1);
 	}
 	g_trials++;
 }
 
+int partnerOf(size_t i) {
+	for (size_t j = i + 1; j < g_clicks.size(); j++) {
+		if (g_clicks[j].p2 == g_clicks[i].p2) {
+			return (int)j;
+		}
+	}
+	return -1;
+}
+
 void prepareTrial() {
-	prepareTrialFor(g_clicks[g_clickIndex]);
+	Click c = g_clicks[g_clickIndex];
+	c.nextFrame = -1;
+	int p = partnerOf(g_clickIndex);
+	if (p >= 0) {
+		c.nextFrame = (int)g_original[g_clicks[p].main].frame;
+	}
+	prepareTrialFor(c);
 }
 
 void writeFwc(std::string fileName, bool pressesOnly) {
@@ -385,38 +374,14 @@ void writeResults() {
 	writeFwc(g_name + "_clicks.fwc", true);
 }
 
-void nextClickOrFinish() {
-	g_windows.push_back(g_hi - g_lo + 1);
+void finishAnalysis() {
+	g_mode = 0;
+	setSpeed(1.0f);
+	writeResults();
 	if (g_human) {
-		int center = (g_lo + g_hi) / 2;
-		Click c = g_clicks[g_clickIndex];
-		for (size_t k = 0; k < c.idx.size(); k++) {
-			g_original[c.idx[k]].frame += center;
-		}
-		g_log << "move click " << g_clickIndex << " by " << center << "\n";
+		writeHumanMacro();
 	}
-	g_log << "click " << g_clickIndex << " frame " << g_original[g_clicks[g_clickIndex].main].frame << " down " << g_clicks[g_clickIndex].down << " lo " << g_lo << " hi " << g_hi << " window " << (g_hi - g_lo + 1) << "\n";
-	g_log.flush();
-	g_clickIndex++;
-	if (g_clickIndex % 10 == 0 && g_clickIndex < g_clicks.size()) {
-		Notification::create(fmt::format("Click {}/{}", g_clickIndex, g_clicks.size()), NotificationIcon::Info)->show();
-	}
-	g_dir = -1;
-	g_shift = -1;
-	g_lo = 0;
-	g_hi = 0;
-	if (g_clickIndex < g_clicks.size()) {
-		updateBounds(g_clickIndex);
-	}
-	if (g_clickIndex >= g_clicks.size()) {
-		g_mode = 0;
-		setSpeed(1.0f);
-		writeResults();
-		if (g_human) {
-			writeHumanMacro();
-		}
-		Notification::create("Analysis finished! See gd-mods folder", NotificationIcon::Success)->show();
-	}
+	Notification::create("Analysis finished! See gd-mods folder", NotificationIcon::Success)->show();
 }
 
 bool shiftAllowed() {
@@ -424,15 +389,132 @@ bool shiftAllowed() {
 	return g_shift >= c.minShift && g_shift <= c.maxShift && g_shift >= -MAX_SHIFT && g_shift <= MAX_SHIFT;
 }
 
-void seekValid() {
+void goNextClick();
+void clickDone();
+
+void continueSearch() {
 	while (g_mode == 2 && !shiftAllowed()) {
 		if (g_dir == -1) {
 			g_dir = 1;
 			g_shift = 1;
 		} else {
-			nextClickOrFinish();
+			clickDone();
+			return;
 		}
 	}
+	if (g_mode == 2) {
+		prepareTrial();
+	}
+}
+
+bool verifyAllowed() {
+	if (g_vshift <= 0) {
+		return true;
+	}
+	int p = partnerOf(g_clickIndex);
+	if (p < 0) {
+		return true;
+	}
+	Click partner = g_clicks[p];
+	updateBoundsOf(partner);
+	return g_vshift <= partner.maxShift;
+}
+
+void prepareVerify() {
+	Click c = g_clicks[g_clickIndex];
+	int p = partnerOf(g_clickIndex);
+	g_inputs = g_original;
+	int last = 0;
+	for (size_t k = 0; k < c.idx.size(); k++) {
+		g_inputs[c.idx[k]].frame += g_vshift;
+		last = std::max(last, (int)g_original[c.idx[k]].frame);
+	}
+	if (p >= 0) {
+		Click partner = g_clicks[p];
+		for (size_t k = 0; k < partner.idx.size(); k++) {
+			g_inputs[partner.idx[k]].frame += g_vshift;
+			last = std::max(last, (int)g_original[partner.idx[k]].frame);
+		}
+	}
+	std::stable_sort(g_inputs.begin(), g_inputs.end(), sortByFrame);
+	g_checkFrom = std::max(last, last + g_vshift) + 2;
+	g_limit = -1;
+	g_trials++;
+}
+
+void verifyNext() {
+	while (g_vshift != 0) {
+		if (verifyAllowed()) {
+			prepareVerify();
+			return;
+		}
+		if (g_vshift > 0) {
+			g_vshift--;
+		} else {
+			g_vshift++;
+		}
+	}
+	g_verifying = false;
+	goNextClick();
+}
+
+void verifyAfter(bool ok) {
+	if (ok) {
+		Click c = g_clicks[g_clickIndex];
+		for (size_t k = 0; k < c.idx.size(); k++) {
+			g_original[c.idx[k]].frame += g_vshift;
+		}
+		int p = partnerOf(g_clickIndex);
+		if (p >= 0) {
+			Click partner = g_clicks[p];
+			for (size_t k = 0; k < partner.idx.size(); k++) {
+				g_original[partner.idx[k]].frame += g_vshift;
+			}
+		}
+		g_log << "move input " << g_clickIndex << " by " << g_vshift << "\n";
+		g_verifying = false;
+		goNextClick();
+		return;
+	}
+	if (g_vshift > 0) {
+		g_vshift--;
+	} else {
+		g_vshift++;
+	}
+	verifyNext();
+}
+
+void clickDone() {
+	g_windows.push_back(g_hi - g_lo + 1);
+	g_log << "click " << g_clickIndex << " frame " << g_original[g_clicks[g_clickIndex].main].frame << " down " << g_clicks[g_clickIndex].down << " lo " << g_lo << " hi " << g_hi << " window " << (g_hi - g_lo + 1) << "\n";
+	g_log.flush();
+	if (g_human) {
+		int center = (g_lo + g_hi) / 2;
+		if (center != 0) {
+			g_verifying = true;
+			g_vshift = center;
+			verifyNext();
+			return;
+		}
+	}
+	goNextClick();
+}
+
+void goNextClick() {
+	g_clickIndex++;
+	if (g_clickIndex % 10 == 0 && g_clickIndex < g_clicks.size()) {
+		Notification::create(fmt::format("Input {}/{}", g_clickIndex, g_clicks.size()), NotificationIcon::Info)->show();
+	}
+	g_dir = -1;
+	g_shift = -1;
+	g_lo = 0;
+	g_hi = 0;
+	if (g_clickIndex >= g_clicks.size()) {
+		finishAnalysis();
+		return;
+	}
+	updateBounds(g_clickIndex);
+	continueSearch();
 }
 
 void advanceAfter(bool ok) {
@@ -449,13 +531,11 @@ void advanceAfter(bool ok) {
 			g_dir = 1;
 			g_shift = 1;
 		} else {
-			nextClickOrFinish();
+			clickDone();
+			return;
 		}
 	}
-	seekValid();
-	if (g_mode == 2) {
-		prepareTrial();
-	}
+	continueSearch();
 }
 
 void startWindowPhase() {
@@ -487,15 +567,11 @@ void startWindowPhase() {
 	g_lo = 0;
 	g_hi = 0;
 	if (g_clicks.empty()) {
-		g_mode = 0;
-		setSpeed(1.0f);
-		writeResults();
+		finishAnalysis();
 		return;
 	}
-	seekValid();
-	if (g_mode == 2) {
-		prepareTrial();
-	}
+	updateBounds(0);
+	continueSearch();
 }
 
 void relPrepare() {
@@ -541,6 +617,8 @@ void finishTrial(bool ok) {
 	g_trialDone = true;
 	if (g_phase == 0) {
 		relAfter(ok);
+	} else if (g_verifying) {
+		verifyAfter(ok);
 	} else {
 		advanceAfter(ok);
 	}
@@ -554,28 +632,7 @@ void startTrials() {
 	g_trials = 0;
 	g_mode = 2;
 	g_noop.clear();
-	if (g_human) {
-		g_phase = 1;
-		buildClicks();
-		g_log << "baseline ticks " << g_baseline.size() << " clicks " << g_clicks.size() << "\n";
-		g_log.flush();
-		g_clickIndex = 0;
-		g_dir = -1;
-		g_shift = -1;
-		g_lo = 0;
-		g_hi = 0;
-		if (g_clicks.empty()) {
-			g_mode = 0;
-			return;
-		}
-		seekValid();
-		if (g_mode == 2) {
-			prepareTrial();
-			requestReset();
-		}
-		return;
-	}
-
+	g_verifying = false;
 	g_phase = 0;
 	g_events = buildEvents();
 	for (size_t i = 0; i < g_events.size(); i++) {

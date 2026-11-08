@@ -37,7 +37,7 @@
 		},
 		"human-macro": {
 			"name": "Make human macro",
-			"description": "Move every click to the middle of its window and save <name>_human.gdr2",
+			"description": "Move every input to the middle of its window (each move is checked) and save <name>_human.gdr2",
 			"type": "bool",
 			"default": false
 		}
