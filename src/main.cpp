@@ -69,6 +69,8 @@ std::string g_name = "startfa1";
 bool g_swap = false;
 bool g_human = false;
 bool g_verifying = false;
+bool g_isWave = true;
+const int MIN_HORIZON = 30;
 int g_vshift = 0;
 Replay g_meta;
 
@@ -285,6 +287,9 @@ void prepareTrialFor(Click c) {
 		g_limit = std::max(frame, frame + g_shift) + RELEVANCE_TICKS;
 	} else if (c.nextFrame >= 0) {
 		g_limit = std::max(frame + g_shift + 2, c.nextFrame - std::abs(g_shift) - 1);
+		if (!g_isWave) {
+			g_limit = std::max(g_limit, frame + std::abs(g_shift) + MIN_HORIZON);
+		}
 	}
 	g_trials++;
 }
@@ -298,10 +303,31 @@ int partnerOf(size_t i) {
 	return -1;
 }
 
+int nextPressOf(size_t i) {
+	for (size_t j = i + 1; j < g_clicks.size(); j++) {
+		if (g_clicks[j].p2 == g_clicks[i].p2 && g_clicks[j].down) {
+			return (int)j;
+		}
+	}
+	return -1;
+}
+
+bool waveAt(int frame) {
+	if (frame < 0 || frame >= (int)g_baseline.size()) {
+		return false;
+	}
+	return (g_baseline[frame].flags1 & 16) != 0;
+}
+
 void prepareTrial() {
 	Click c = g_clicks[g_clickIndex];
+	int frame = (int)g_original[c.main].frame;
+	g_isWave = waveAt(frame);
 	c.nextFrame = -1;
 	int p = partnerOf(g_clickIndex);
+	if (!g_isWave) {
+		p = nextPressOf(g_clickIndex);
+	}
 	if (p >= 0) {
 		c.nextFrame = (int)g_original[g_clicks[p].main].frame;
 	}
@@ -486,7 +512,7 @@ void verifyAfter(bool ok) {
 
 void clickDone() {
 	g_windows.push_back(g_hi - g_lo + 1);
-	g_log << "click " << g_clickIndex << " frame " << g_original[g_clicks[g_clickIndex].main].frame << " down " << g_clicks[g_clickIndex].down << " lo " << g_lo << " hi " << g_hi << " window " << (g_hi - g_lo + 1) << "\n";
+	g_log << "click " << g_clickIndex << " frame " << g_original[g_clicks[g_clickIndex].main].frame << " down " << g_clicks[g_clickIndex].down << " lo " << g_lo << " hi " << g_hi << " window " << (g_hi - g_lo + 1) << " wave " << g_isWave << "\n";
 	g_log.flush();
 	if (g_human) {
 		int center = (g_lo + g_hi) / 2;
