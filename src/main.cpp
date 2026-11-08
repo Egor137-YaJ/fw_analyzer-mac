@@ -766,6 +766,8 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 				if (sameState(now, g_baseline[tick])) {
 					g_log << "trial click " << g_clickIndex << " shift " << g_shift << " ok (same state at " << tick << ")\n";
 					finishTrial(true);
+				} else if (g_phase == 0) {
+					finishTrial(false);
 				}
 			}
 		}
