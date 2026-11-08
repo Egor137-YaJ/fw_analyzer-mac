@@ -1,5 +1,5 @@
 # FW Analyzer
-This is where she makes a mod.
+This is where mod made.
 
 <img src="logo.png" width="150" alt="the mod's logo" />
 
