@@ -13,5 +13,33 @@
 	"description": "Automatic frame window analyzer",
 	"dependencies": {
 		"geode.node-ids": ">=v1.23.3"
+	},
+	"settings": {
+		"replay": {
+			"name": "Replay name",
+			"description": "Eclipse replay file name without .gdr2",
+			"type": "string",
+			"default": "startfa1",
+			"filter": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-. "
+		},
+		"speed": {
+			"name": "Analysis speed",
+			"type": "float",
+			"default": 20.0,
+			"min": 1.0,
+			"max": 200.0
+		},
+		"swap-players": {
+			"name": "Swap players",
+			"description": "Turn on if the replay doesn't press at all (was needed for starfa)",
+			"type": "bool",
+			"default": false
+		},
+		"human-macro": {
+			"name": "Make human macro",
+			"description": "Move every click to the middle of its window and save <name>_human.gdr2",
+			"type": "bool",
+			"default": false
+		}
 	}
 }
