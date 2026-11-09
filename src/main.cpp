@@ -72,6 +72,18 @@ bool g_human = false;
 bool g_verifying = false;
 bool g_isWave = true;
 bool g_waitStart = true;
+bool g_block = false;
+bool g_collapseDone = false;
+bool g_resetQueued = false;
+int g_collapseCount = 0;
+int g_collapseFrom = -1;
+size_t g_cutA = 0;
+size_t g_cutC = 0;
+size_t g_cutD = 0;
+bool g_hasD = false;
+int g_variant = 1;
+int g_cutLen = 0;
+const int MICRO_TICKS = 16;
 const int MIN_HORIZON = 30;
 int g_vshift = 0;
 Replay g_meta;
@@ -107,13 +119,13 @@ State readState(GJBaseGameLayer* layer) {
 	return s;
 }
 
-bool near(double a, double b) {
+bool closeEnough(double a, double b) {
 	return std::abs(a - b) < 0.01;
 }
 
 bool sameState(State a, State b) {
-	return near(a.x1, b.x1) && near(a.y1, b.y1) && near(a.vel1, b.vel1) && a.flags1 == b.flags1
-		&& near(a.x2, b.x2) && near(a.y2, b.y2) && near(a.vel2, b.vel2) && a.flags2 == b.flags2;
+	return closeEnough(a.x1, b.x1) && closeEnough(a.y1, b.y1) && closeEnough(a.vel1, b.vel1) && a.flags1 == b.flags1
+		&& closeEnough(a.x2, b.x2) && closeEnough(a.y2, b.y2) && closeEnough(a.vel2, b.vel2) && a.flags2 == b.flags2;
 }
 
 bool sortByFrame(gdr::Input<> const& a, gdr::Input<> const& b) {
@@ -177,8 +189,11 @@ void updateBoundsOf(Click& c) {
 	}
 }
 
+bool waveAt(int frame);
+
 void updateBounds(size_t index) {
 	updateBoundsOf(g_clicks[index]);
+	g_block = g_human && waveAt((int)g_original[g_clicks[index].main].frame);
 }
 
 std::vector<Click> buildEvents() {
@@ -271,7 +286,12 @@ void setSpeed(float speed) {
 }
 
 void requestReset() {
+	if (g_resetQueued) {
+		return;
+	}
+	g_resetQueued = true;
 	geode::queueInMainThread([]() {
+		g_resetQueued = false;
 		if (auto pl = PlayLayer::get()) {
 			pl->resetLevel();
 		}
@@ -325,7 +345,30 @@ bool waveAt(int frame) {
 	return (g_baseline[frame].flags1 & 16) != 0;
 }
 
+Click currentClick() {
+	Click c = g_clicks[g_clickIndex];
+	if (!g_block) {
+		return c;
+	}
+	int p = partnerOf(g_clickIndex);
+	if (p >= 0) {
+		Click partner = g_clicks[p];
+		for (size_t k = 0; k < partner.idx.size(); k++) {
+			c.idx.push_back(partner.idx[k]);
+		}
+	}
+	updateBoundsOf(c);
+	return c;
+}
+
 void prepareTrial() {
+	if (g_block) {
+		Click block = currentClick();
+		block.nextFrame = -1;
+		g_isWave = true;
+		prepareTrialFor(block);
+		return;
+	}
 	Click c = g_clicks[g_clickIndex];
 	int frame = (int)g_original[c.main].frame;
 	g_isWave = waveAt(frame);
@@ -417,7 +460,7 @@ void finishAnalysis() {
 }
 
 bool shiftAllowed() {
-	Click c = g_clicks[g_clickIndex];
+	Click c = currentClick();
 	return g_shift >= c.minShift && g_shift <= c.maxShift && g_shift >= -MAX_SHIFT && g_shift <= MAX_SHIFT;
 }
 
@@ -469,7 +512,7 @@ void prepareVerify() {
 		}
 	}
 	std::stable_sort(g_inputs.begin(), g_inputs.end(), sortByFrame);
-	g_checkFrom = std::max(last, last + g_vshift) + 2;
+	g_checkFrom = 1000000000;
 	g_limit = -1;
 	g_trials++;
 }
@@ -642,12 +685,148 @@ void relAfter(bool ok) {
 	relPrepare();
 }
 
+bool findCollapse() {
+	std::vector<Click> events = buildEvents();
+	for (size_t i = 0; i + 2 < events.size(); i++) {
+		Click a = events[i];
+		int fa = (int)g_original[a.main].frame;
+		if (fa <= g_collapseFrom) {
+			continue;
+		}
+		if (!waveAt(fa)) {
+			continue;
+		}
+		int j = -1;
+		int k = -1;
+		for (size_t m = i + 1; m < events.size(); m++) {
+			if (events[m].p2 != a.p2) {
+				continue;
+			}
+			if (j < 0) {
+				j = (int)m;
+			} else {
+				k = (int)m;
+				break;
+			}
+		}
+		if (j < 0 || k < 0) {
+			continue;
+		}
+		int d = -1;
+		for (int m = (int)i - 1; m >= 0; m--) {
+			if (events[m].p2 == a.p2) {
+				d = m;
+				break;
+			}
+		}
+		Click b = events[j];
+		Click c = events[k];
+		if (b.down == a.down || c.down != a.down) {
+			continue;
+		}
+		int len = (int)g_original[b.main].frame - fa;
+		if (len < 1 || len > MICRO_TICKS) {
+			continue;
+		}
+		g_cutA = a.main;
+		g_cutC = c.main;
+		g_cutLen = len;
+		g_hasD = d >= 0 && events[d].down != a.down;
+		if (g_hasD) {
+			g_cutD = events[d].main;
+		}
+		g_variant = 1;
+		g_collapseFrom = fa;
+		return true;
+	}
+	return false;
+}
+
+std::vector<gdr::Input<>> collapsedInputs() {
+	int fa = (int)g_original[g_cutA].frame;
+	int fc = (int)g_original[g_cutC].frame;
+	int fd = -1;
+	if (g_hasD) {
+		fd = (int)g_original[g_cutD].frame;
+	}
+	bool p2 = g_original[g_cutA].player2;
+	std::vector<gdr::Input<>> result;
+	for (size_t i = 0; i < g_original.size(); i++) {
+		auto input = g_original[i];
+		int f = (int)input.frame;
+		if (input.player2 == p2) {
+			if (g_variant == 1) {
+				if (f >= fa && f < fc) {
+					continue;
+				}
+				if (f == fc) {
+					input.frame = fc - g_cutLen;
+				}
+			} else {
+				if (f > fd && f < fc) {
+					continue;
+				}
+				if (f == fd) {
+					input.frame = fd + g_cutLen;
+				}
+			}
+		}
+		result.push_back(input);
+	}
+	std::stable_sort(result.begin(), result.end(), sortByFrame);
+	return result;
+}
+
+void prepareCollapseTrial() {
+	g_inputs = collapsedInputs();
+	g_checkFrom = 1000000000;
+	g_limit = -1;
+	g_trials++;
+}
+
+void startWindowsAfterCollapse();
+
+void collapseNext() {
+	if (findCollapse()) {
+		prepareCollapseTrial();
+		return;
+	}
+	g_log << "micro clicks removed " << g_collapseCount << "\n";
+	g_log.flush();
+	g_collapseDone = true;
+	if (g_collapseCount == 0) {
+		startWindowsAfterCollapse();
+		return;
+	}
+	Notification::create(fmt::format("Removed {} micro clicks, new baseline", g_collapseCount), NotificationIcon::Info)->show();
+	g_inputs = g_original;
+	g_baseline.clear();
+	g_mode = 1;
+	requestReset();
+}
+
+void collapseAfter(bool ok) {
+	g_log << "micro click at " << g_original[g_cutA].frame << " len " << g_cutLen << " variant " << g_variant << " removed " << ok << "\n";
+	if (!ok && g_variant == 1 && g_hasD) {
+		g_variant = 2;
+		prepareCollapseTrial();
+		return;
+	}
+	if (ok) {
+		g_original = collapsedInputs();
+		g_collapseCount++;
+	}
+	collapseNext();
+}
+
 void finishTrial(bool ok) {
 	if (g_trialDone) {
 		return;
 	}
 	g_trialDone = true;
-	if (g_phase == 0) {
+	if (g_phase == -1) {
+		collapseAfter(ok);
+	} else if (g_phase == 0) {
 		relAfter(ok);
 	} else if (g_verifying) {
 		verifyAfter(ok);
@@ -660,6 +839,19 @@ void finishTrial(bool ok) {
 }
 
 void startTrials() {
+	if (g_human && !g_collapseDone) {
+		g_mode = 2;
+		g_phase = -1;
+		g_collapseCount = 0;
+		g_collapseFrom = -1;
+		collapseNext();
+		requestReset();
+		return;
+	}
+	startWindowsAfterCollapse();
+}
+
+void startWindowsAfterCollapse() {
 	g_windows.clear();
 	g_trials = 0;
 	g_mode = 2;
@@ -726,6 +918,7 @@ class $modify(MyMenuLayer, MenuLayer) {
 		g_baseline.clear();
 		g_mode = 1;
 		g_next = 0;
+		g_collapseDone = false;
 		std::string text = fmt::format("Loaded {} inputs.\nOpen the level in normal mode\nand don't touch anything.", g_original.size());
 		FLAlertLayer::create("FW Analyzer", text, "OK")->show();
 	}
@@ -778,8 +971,6 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 					g_log << "trial click " << g_clickIndex << " shift " << g_shift << " ok (same state at " << tick << ")\n";
 					finishTrial(true);
 				} else if (g_phase == 0) {
-					State b = g_baseline[tick];
-					g_log << "diff tick " << tick << " x " << now.x1 << "/" << b.x1 << " y " << now.y1 << "/" << b.y1 << " vel " << now.vel1 << "/" << b.vel1 << " flags " << now.flags1 << "/" << b.flags1 << " p2 x " << now.x2 << "/" << b.x2 << " y " << now.y2 << "/" << b.y2 << " vel " << now.vel2 << "/" << b.vel2 << " flags " << now.flags2 << "/" << b.flags2 << "\n";
 					finishTrial(false);
 				}
 			}
