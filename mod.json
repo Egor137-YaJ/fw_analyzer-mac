@@ -40,6 +40,14 @@
 			"description": "Move every input to the middle of its window (each move is checked) and save <name>_human.gdr2",
 			"type": "bool",
 			"default": false
+		},
+		"human-passes": {
+			"name": "Human macro passes",
+			"description": "How many times to repeat centering (each pass re-centers what the previous one shifted)",
+			"type": "int",
+			"default": 3,
+			"min": 1,
+			"max": 10
 		}
 	}
 }

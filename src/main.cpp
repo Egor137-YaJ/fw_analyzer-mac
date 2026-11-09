@@ -73,6 +73,8 @@ bool g_verifying = false;
 bool g_isWave = true;
 bool g_waitStart = true;
 bool g_block = false;
+int g_pass = 1;
+int g_moves = 0;
 bool g_collapseDone = false;
 bool g_resetQueued = false;
 int g_collapseCount = 0;
@@ -450,12 +452,26 @@ void writeResults() {
 }
 
 void finishAnalysis() {
-	g_mode = 0;
-	setSpeed(1.0f);
 	writeResults();
 	if (g_human) {
 		writeHumanMacro();
+		int passes = (int)Mod::get()->getSettingValue<int64_t>("human-passes");
+		g_log << "pass " << g_pass << " moves " << g_moves << "\n";
+		g_log.flush();
+		if (g_pass < passes && g_moves > 0) {
+			g_pass++;
+			g_moves = 0;
+			Notification::create(fmt::format("Pass {}/{}", g_pass, passes), NotificationIcon::Info)->show();
+			g_inputs = g_original;
+			g_baseline.clear();
+			g_collapseDone = true;
+			g_mode = 1;
+			requestReset();
+			return;
+		}
 	}
+	g_mode = 0;
+	setSpeed(1.0f);
 	Notification::create("Analysis finished! See gd-mods folder", NotificationIcon::Success)->show();
 }
 
@@ -486,6 +502,9 @@ bool verifyAllowed() {
 	if (g_vshift <= 0) {
 		return true;
 	}
+	if (!g_block) {
+		return true;
+	}
 	int p = partnerOf(g_clickIndex);
 	if (p < 0) {
 		return true;
@@ -497,7 +516,10 @@ bool verifyAllowed() {
 
 void prepareVerify() {
 	Click c = g_clicks[g_clickIndex];
-	int p = partnerOf(g_clickIndex);
+	int p = -1;
+	if (g_block) {
+		p = partnerOf(g_clickIndex);
+	}
 	g_inputs = g_original;
 	int last = 0;
 	for (size_t k = 0; k < c.idx.size(); k++) {
@@ -539,13 +561,17 @@ void verifyAfter(bool ok) {
 		for (size_t k = 0; k < c.idx.size(); k++) {
 			g_original[c.idx[k]].frame += g_vshift;
 		}
-		int p = partnerOf(g_clickIndex);
+		int p = -1;
+		if (g_block) {
+			p = partnerOf(g_clickIndex);
+		}
 		if (p >= 0) {
 			Click partner = g_clicks[p];
 			for (size_t k = 0; k < partner.idx.size(); k++) {
 				g_original[partner.idx[k]].frame += g_vshift;
 			}
 		}
+		g_moves++;
 		g_log << "move input " << g_clickIndex << " by " << g_vshift << "\n";
 		g_verifying = false;
 		goNextClick();
@@ -919,6 +945,8 @@ class $modify(MyMenuLayer, MenuLayer) {
 		g_mode = 1;
 		g_next = 0;
 		g_collapseDone = false;
+		g_pass = 1;
+		g_moves = 0;
 		std::string text = fmt::format("Loaded {} inputs.\nOpen the level in normal mode\nand don't touch anything.", g_original.size());
 		FLAlertLayer::create("FW Analyzer", text, "OK")->show();
 	}
