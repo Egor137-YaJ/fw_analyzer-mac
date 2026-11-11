@@ -133,10 +133,16 @@ State readState(GJBaseGameLayer* layer) {
 	s.y1 = layer->m_player1->getPositionY();
 	s.vel1 = layer->m_player1->m_yVelocity;
 	s.flags1 = playerFlags(layer->m_player1);
-	s.x2 = layer->m_player2->getPositionX();
-	s.y2 = layer->m_player2->getPositionY();
-	s.vel2 = layer->m_player2->m_yVelocity;
-	s.flags2 = playerFlags(layer->m_player2);
+	s.x2 = 0;
+	s.y2 = 0;
+	s.vel2 = 0;
+	s.flags2 = 0;
+	if (layer->m_gameState.m_isDualMode) {
+		s.x2 = layer->m_player2->getPositionX();
+		s.y2 = layer->m_player2->getPositionY();
+		s.vel2 = layer->m_player2->m_yVelocity;
+		s.flags2 = playerFlags(layer->m_player2);
+	}
 	return s;
 }
 
@@ -1310,15 +1316,6 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 				if (tick >= g_nextCpTick && !g_held[0] && !g_held[1] && tick - g_lastInputTick >= 2 && nextInput - tick >= 2) {
 					auto cp = pl->createCheckpoint();
 					if (cp) {
-						if (m_gameState.m_isDualMode) {
-							g_log << "cp at " << tick << " dual, p2 checkpoint " << (cp->m_player2Checkpoint != nullptr) << "\n";
-							if (!cp->m_player2Checkpoint) {
-								auto pc = PlayerCheckpoint::create();
-								pc->retain();
-								m_player2->saveToCheckpoint(pc);
-								cp->m_player2Checkpoint = pc;
-							}
-						}
 						if (!g_cpArray) {
 							g_cpArray = cocos2d::CCArray::create();
 							g_cpArray->retain();
@@ -1417,22 +1414,6 @@ class $modify(MyPlayLayer, PlayLayer) {
 			}
 		}
 		PlayLayer::resetLevel();
-		if (useCp) {
-			auto cp = static_cast<CheckpointObject*>(g_cpArray->objectAtIndex(g_loadCp));
-			if (cp->m_gameState.m_isDualMode && cp->m_player2Checkpoint) {
-				float before = m_player2->getPositionX();
-				bool dual = m_gameState.m_isDualMode;
-				bool visible = m_player2->isVisible();
-				if (!closeEnough(before, cp->m_player2Checkpoint->m_position.x)) {
-					m_gameState.m_isDualMode = true;
-					m_player2->loadFromCheckpoint(cp->m_player2Checkpoint);
-					m_player2->setVisible(true);
-				}
-				if (g_phase == -2) {
-					g_log << "p2 restore cp " << g_loadCp << " dual " << dual << " visible " << visible << " before x " << before << " cp x " << cp->m_player2Checkpoint->m_position.x << " after x " << m_player2->getPositionX() << " y " << m_player2->getPositionY() << "\n";
-				}
-			}
-		}
 		if (g_mode != 0 && m_checkpointArray) {
 			m_checkpointArray->removeAllObjects();
 			m_isPracticeMode = false;
