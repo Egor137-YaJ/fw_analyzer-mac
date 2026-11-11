@@ -591,6 +591,13 @@ void clickDone() {
 	g_log.flush();
 	if (g_human) {
 		int center = (g_lo + g_hi) / 2;
+		Click c = currentClick();
+		int minAllowed = std::max(c.minShift, -MAX_SHIFT);
+		int maxAllowed = std::min(c.maxShift, MAX_SHIFT);
+		if (g_lo <= minAllowed || g_hi >= maxAllowed) {
+			g_log << "skip clipped window " << g_clickIndex << "\n";
+			center = 0;
+		}
 		if (center != 0) {
 			g_verifying = true;
 			g_vshift = center;
