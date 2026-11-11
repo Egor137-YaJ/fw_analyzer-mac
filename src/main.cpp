@@ -105,6 +105,7 @@ int playerFlags(PlayerObject* p) {
 	if (p->m_isSpider) f += 64;
 	if (p->m_isSwing) f += 128;
 	if (p->m_isOnGround) f += 256;
+	if (p->m_vehicleSize < 1.0f) f += 512;
 	return f;
 }
 
@@ -385,10 +386,13 @@ void prepareTrial() {
 	prepareTrialFor(c);
 }
 
-void writeFwc(std::string fileName, bool pressesOnly) {
+void writeFwc(std::string fileName, bool pressesOnly, int maxWindow) {
 	std::vector<size_t> list;
 	for (size_t i = 0; i < g_clicks.size(); i++) {
 		if (pressesOnly && !g_clicks[i].down) {
+			continue;
+		}
+		if (maxWindow > 0 && g_windows[i] > maxWindow) {
 			continue;
 		}
 		list.push_back(i);
@@ -417,6 +421,69 @@ void writeFwc(std::string fileName, bool pressesOnly) {
 	}
 }
 
+std::string modeName(int flags) {
+	std::string name = "cube";
+	if (flags & 2) {
+		name = "ship";
+	} else if (flags & 4) {
+		name = "ufo";
+	} else if (flags & 8) {
+		name = "ball";
+	} else if (flags & 16) {
+		name = "wave";
+	} else if (flags & 32) {
+		name = "robot";
+	} else if (flags & 64) {
+		name = "spider";
+	} else if (flags & 128) {
+		name = "swing";
+	}
+	if (flags & 512) {
+		name = "mini " + name;
+	}
+	return name;
+}
+
+std::string modeOf(size_t i) {
+	auto input = g_original[g_clicks[i].main];
+	int frame = (int)input.frame;
+	if (frame < 0 || frame >= (int)g_baseline.size()) {
+		return "unknown";
+	}
+	bool isPlayer1 = !input.player2;
+	if (g_swap) {
+		isPlayer1 = input.player2;
+	}
+	if (!isPlayer1 && g_baseline[frame].x2 != 0.0f) {
+		return modeName(g_baseline[frame].flags2);
+	}
+	return modeName(g_baseline[frame].flags1);
+}
+
+int fpGroup(int window) {
+	if (window <= 1) {
+		return 0;
+	}
+	if (window == 2) {
+		return 1;
+	}
+	if (window == 3) {
+		return 2;
+	}
+	if (window == 4) {
+		return 3;
+	}
+	if (window <= 8) {
+		return 4;
+	}
+	return 5;
+}
+
+void writeSection(std::ofstream& txt, std::string mode, int startFrame, int endFrame, int counts[6]) {
+	txt << fmt::format("{:>6.2f} - {:>6.2f} s  {:<12}", startFrame / 240.0, endFrame / 240.0, mode);
+	txt << " 240fp " << counts[0] << "  120fp " << counts[1] << "  80fp " << counts[2] << "  60fp " << counts[3] << "  30fp " << counts[4] << "  easier " << counts[5] << "\n";
+}
+
 void writeResults() {
 	std::ofstream txt(outDir() / (g_name + "_result.txt"), std::ios::out | std::ios::trunc);
 	std::map<int, int> pressCounts;
@@ -424,13 +491,53 @@ void writeResults() {
 	for (size_t i = 0; i < g_clicks.size(); i++) {
 		auto input = g_original[g_clicks[i].main];
 		std::string type = g_clicks[i].down ? "press" : "release";
-		txt << type << " " << i << " frame " << input.frame << " p2 " << input.player2 << " window " << g_windows[i] << "\n";
+		txt << type << " " << i << " frame " << input.frame << " p2 " << input.player2 << " window " << g_windows[i] << " mode " << modeOf(i) << "\n";
 		if (g_clicks[i].down) {
 			pressCounts[g_windows[i]]++;
 		} else {
 			releaseCounts[g_windows[i]]++;
 		}
 	}
+
+	txt << "\nsections\n";
+	int total[6] = { 0, 0, 0, 0, 0, 0 };
+	std::map<std::string, std::vector<int>> byMode;
+	int counts[6] = { 0, 0, 0, 0, 0, 0 };
+	std::string current = "";
+	int startFrame = 0;
+	int lastFrame = 0;
+	for (size_t i = 0; i < g_clicks.size(); i++) {
+		std::string mode = modeOf(i);
+		int frame = (int)g_original[g_clicks[i].main].frame;
+		if (mode != current) {
+			if (current != "") {
+				writeSection(txt, current, startFrame, lastFrame, counts);
+			}
+			current = mode;
+			startFrame = frame;
+			for (int k = 0; k < 6; k++) {
+				counts[k] = 0;
+			}
+		}
+		int g = fpGroup(g_windows[i]);
+		counts[g]++;
+		total[g]++;
+		if (byMode[mode].empty()) {
+			byMode[mode].assign(6, 0);
+		}
+		byMode[mode][g]++;
+		lastFrame = frame;
+	}
+	if (current != "") {
+		writeSection(txt, current, startFrame, lastFrame, counts);
+	}
+
+	txt << "\nby mode\n";
+	for (auto& [mode, c] : byMode) {
+		txt << fmt::format("{:<12}", mode) << " 240fp " << c[0] << "  120fp " << c[1] << "  80fp " << c[2] << "  60fp " << c[3] << "  30fp " << c[4] << "  easier " << c[5] << "\n";
+	}
+	txt << "\ntotal        240fp " << total[0] << "  120fp " << total[1] << "  80fp " << total[2] << "  60fp " << total[3] << "  30fp " << total[4] << "  easier " << total[5] << "\n";
+
 	txt << "\npresses\n";
 	for (auto& [w, n] : pressCounts) {
 		txt << "window " << w << ": " << n << "\n";
@@ -447,8 +554,9 @@ void writeResults() {
 		txt << "window " << w << ": " << n << "\n";
 	}
 
-	writeFwc(g_name + "_windows.fwc", false);
-	writeFwc(g_name + "_clicks.fwc", true);
+	writeFwc(g_name + "_windows.fwc", false, 0);
+	writeFwc(g_name + "_clicks.fwc", true, 0);
+	writeFwc(g_name + "_clean.fwc", false, 8);
 }
 
 void finishAnalysis() {
