@@ -73,6 +73,19 @@ bool g_verifying = false;
 bool g_isWave = true;
 bool g_waitStart = true;
 bool g_block = false;
+cocos2d::CCArray* g_cpArray = nullptr;
+std::vector<int> g_cpTick;
+std::vector<bool> g_cpOk;
+int g_loadCp = -1;
+size_t g_cpTest = 0;
+int g_cpFirstTick = -1;
+int g_tickOffset = 0;
+bool g_findOffset = false;
+bool g_held[2] = { false, false };
+int g_nextCpTick = 120;
+int g_lastInputTick = -100;
+const int CP_EVERY = 240;
+const int CP_TEST_TICKS = 60;
 int g_pass = 1;
 int g_moves = 0;
 bool g_collapseDone = false;
@@ -960,12 +973,105 @@ void collapseAfter(bool ok) {
 	collapseNext();
 }
 
+int firstChange() {
+	size_t n = std::min(g_inputs.size(), g_original.size());
+	for (size_t i = 0; i < n; i++) {
+		auto a = g_inputs[i];
+		auto b = g_original[i];
+		if (a.frame != b.frame || a.down != b.down || a.player2 != b.player2) {
+			return (int)std::min(a.frame, b.frame);
+		}
+	}
+	if (g_inputs.size() != g_original.size()) {
+		if (n < g_inputs.size()) {
+			return (int)g_inputs[n].frame;
+		}
+		if (n < g_original.size()) {
+			return (int)g_original[n].frame;
+		}
+	}
+	return 1000000000;
+}
+
+int pickCheckpoint() {
+	int change = firstChange();
+	int best = -1;
+	for (size_t i = 0; i < g_cpTick.size() && i < g_cpOk.size(); i++) {
+		if (g_cpOk[i] && g_cpTick[i] <= change - 2) {
+			best = (int)i;
+		}
+	}
+	return best;
+}
+
+void clearCheckpoints() {
+	if (g_cpArray) {
+		g_cpArray->release();
+		g_cpArray = nullptr;
+	}
+	g_cpTick.clear();
+	g_cpOk.clear();
+	g_loadCp = -1;
+	g_held[0] = false;
+	g_held[1] = false;
+	g_nextCpTick = CP_EVERY / 2;
+	g_lastInputTick = -100;
+}
+
+void prepareCpTest() {
+	g_inputs = g_original;
+	g_loadCp = (int)g_cpTest;
+	g_cpFirstTick = -1;
+	g_limit = -1;
+	g_checkFrom = 1000000000;
+}
+
+void startTrials();
+
+void startCpTest() {
+	g_cpOk.assign(g_cpTick.size(), false);
+	g_log << "checkpoints " << g_cpTick.size() << "\n";
+	g_log.flush();
+	if (g_cpTick.empty()) {
+		startTrials();
+		return;
+	}
+	g_mode = 2;
+	g_phase = -2;
+	g_cpTest = 0;
+	prepareCpTest();
+	requestReset();
+}
+
+void cpTestAfter(bool ok) {
+	g_cpOk[g_cpTest] = ok;
+	g_log << "cp test " << g_cpTest << " tick " << g_cpTick[g_cpTest] << " ok " << ok << "\n";
+	g_cpTest++;
+	if (g_cpTest < g_cpTick.size()) {
+		prepareCpTest();
+		return;
+	}
+	int good = 0;
+	for (size_t i = 0; i < g_cpOk.size(); i++) {
+		if (g_cpOk[i]) {
+			good++;
+		}
+	}
+	g_log << "checkpoints ok " << good << " of " << g_cpOk.size() << "\n";
+	g_log.flush();
+	Notification::create(fmt::format("Checkpoints OK: {}/{}", good, g_cpOk.size()), NotificationIcon::Info)->show();
+	g_loadCp = -1;
+	startTrials();
+}
+
 void finishTrial(bool ok) {
 	if (g_trialDone) {
 		return;
 	}
 	g_trialDone = true;
-	if (g_phase == -1) {
+	if (g_phase == -2) {
+		cpTestAfter(ok);
+	} else if (g_phase == -1) {
 		collapseAfter(ok);
 	} else if (g_phase == 0) {
 		relAfter(ok);
@@ -1024,7 +1130,7 @@ void levelEnded() {
 		g_trialDone = true;
 		Notification::create("Baseline OK, starting analysis", NotificationIcon::Success)->show();
 		setSpeed((float)Mod::get()->getSettingValue<double>("speed"));
-		startTrials();
+		startCpTest();
 		return;
 	}
 	g_log << "trial click " << g_clickIndex << " shift " << g_shift << " ok (completed)\n";
@@ -1060,6 +1166,7 @@ class $modify(MyMenuLayer, MenuLayer) {
 		g_mode = 1;
 		g_next = 0;
 		g_collapseDone = false;
+		clearCheckpoints();
 		g_pass = 1;
 		g_moves = 0;
 		std::string text = fmt::format("Loaded {} inputs.\nOpen the level in normal mode\nand don't touch anything.", g_original.size());
@@ -1074,8 +1181,30 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 				g_waitStart = false;
 			}
 		}
+		if (g_mode != 0 && PlayLayer::get() && !g_trialDone && !g_waitStart && g_findOffset) {
+			int raw = m_gameState.m_currentProgress / 2;
+			State first = readState(this);
+			g_findOffset = false;
+			g_tickOffset = 0;
+			bool found = false;
+			for (int d = -3; d <= 3; d++) {
+				int t = raw + d;
+				if (t >= 0 && t < (int)g_baseline.size() && sameState(first, g_baseline[t])) {
+					g_tickOffset = d;
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				g_tickOffset = -1;
+				g_log << "offset not found after cp " << g_loadCp << " raw " << raw << "\n";
+			}
+			if (g_phase == -2) {
+				g_log << "offset after cp raw " << raw << " offset " << g_tickOffset << "\n";
+			}
+		}
 		if (g_mode != 0 && PlayLayer::get() && !g_trialDone && !g_waitStart) {
-			int tick = m_gameState.m_currentProgress / 2;
+			int tick = m_gameState.m_currentProgress / 2 + g_tickOffset;
 			while (g_next < g_inputs.size() && (int)g_inputs[g_next].frame <= tick) {
 				auto input = g_inputs[g_next];
 				bool isPlayer1 = !input.player2;
@@ -1083,16 +1212,51 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 					isPlayer1 = input.player2;
 				}
 				this->handleButton(input.down, input.button, isPlayer1);
+				if (g_mode == 1) {
+					g_held[input.player2 ? 1 : 0] = input.down;
+					g_lastInputTick = tick;
+				}
 				g_next++;
 			}
 
 			State now = readState(this);
+			auto pl = PlayLayer::get();
 			if (g_mode == 1) {
 				while ((int)g_baseline.size() <= tick) {
 					g_baseline.push_back(now);
 				}
+				int nextInput = 1000000000;
+				if (g_next < g_inputs.size()) {
+					nextInput = (int)g_inputs[g_next].frame;
+				}
+				if (tick >= g_nextCpTick && !g_held[0] && !g_held[1] && tick - g_lastInputTick >= 2 && nextInput - tick >= 2) {
+					auto cp = pl->createCheckpoint();
+					if (cp) {
+						if (!g_cpArray) {
+							g_cpArray = cocos2d::CCArray::create();
+							g_cpArray->retain();
+						}
+						g_cpArray->addObject(cp);
+						g_cpTick.push_back(tick);
+						g_nextCpTick = tick + CP_EVERY;
+					}
+				}
 			}
-			auto pl = PlayLayer::get();
+			if (g_mode == 2 && g_phase == -2 && !g_trialDone) {
+				int start = g_cpTick[g_cpTest];
+				if (g_cpFirstTick < 0) {
+					g_cpFirstTick = tick;
+					bool same = tick < (int)g_baseline.size() && sameState(now, g_baseline[tick]);
+					g_log << "cp " << g_cpTest << " start " << start << " first tick " << tick << " same " << same << " x " << now.x1 << " y " << now.y1 << "\n";
+				}
+				if (tick > start && (tick - start) % CP_TEST_TICKS == 0) {
+					bool ok = tick < (int)g_baseline.size() && sameState(now, g_baseline[tick]);
+					if (!ok) {
+						g_log << "cp " << g_cpTest << " differs at " << tick << "\n";
+						finishTrial(false);
+					}
+				}
+			}
 			if (g_mode == 1 && tick % 240 == 0) {
 				g_log << "base tick " << tick << " percent " << pl->getCurrentPercent() << " x " << now.x1 << " end " << pl->m_levelEndAnimationStarted << "\n";
 				g_log.flush();
@@ -1125,10 +1289,46 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 class $modify(MyPlayLayer, PlayLayer) {
 	void resetLevel() {
 		g_waitStart = true;
+		if (g_mode == 1) {
+			clearCheckpoints();
+		}
+		if (g_mode == 2 && g_phase != -2) {
+			g_loadCp = -1;
+			if (Mod::get()->getSettingValue<bool>("use-checkpoints")) {
+				g_loadCp = pickCheckpoint();
+			}
+		}
+		bool useCp = g_mode == 2 && g_loadCp >= 0 && g_cpArray && g_loadCp < (int)g_cpArray->count();
+		if (g_mode != 0 && m_checkpointArray) {
+			m_checkpointArray->removeAllObjects();
+			m_isPracticeMode = false;
+			if (useCp) {
+				auto cp = static_cast<CheckpointObject*>(g_cpArray->objectAtIndex(g_loadCp));
+				m_checkpointArray->addObject(cp);
+				m_isPracticeMode = true;
+			}
+		}
 		PlayLayer::resetLevel();
+		if (g_mode != 0 && m_checkpointArray) {
+			m_checkpointArray->removeAllObjects();
+			m_isPracticeMode = false;
+		}
+		if (g_mode == 2) {
+			setSpeed((float)Mod::get()->getSettingValue<double>("speed"));
+		}
 
 		g_next = 0;
 		g_trialDone = false;
+		g_tickOffset = 0;
+		g_findOffset = false;
+		if (useCp) {
+			g_findOffset = true;
+			int start = g_cpTick[g_loadCp];
+			while (g_next < g_inputs.size() && (int)g_inputs[g_next].frame <= start) {
+				g_next++;
+			}
+			g_waitStart = false;
+		}
 	}
 
 	void destroyPlayer(PlayerObject* player, GameObject* object) {
@@ -1176,6 +1376,10 @@ class $modify(MyPlayLayer, PlayLayer) {
 	}
 
 	void onQuit() {
+		clearCheckpoints();
+		if (m_checkpointArray) {
+			m_checkpointArray->removeAllObjects();
+		}
 		g_mode = 0;
 		setSpeed(1.0f);
 		PlayLayer::onQuit();

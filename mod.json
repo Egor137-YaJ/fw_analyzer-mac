@@ -48,6 +48,12 @@
 			"default": 3,
 			"min": 1,
 			"max": 10
+		},
+		"use-checkpoints": {
+			"name": "Use checkpoints",
+			"description": "Start each trial from the nearest checkpoint instead of the level start (much faster)",
+			"type": "bool",
+			"default": true
 		}
 	}
 }
