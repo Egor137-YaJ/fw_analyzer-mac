@@ -85,6 +85,9 @@ bool g_held[2] = { false, false };
 int g_nextCpTick = 120;
 int g_lastInputTick = -100;
 const int CP_EVERY = 240;
+std::vector<State> g_tmpBase;
+int g_tmpStart = -1;
+std::map<int, bool> g_tmpMatch;
 const int CP_TEST_TICKS = 60;
 int g_pass = 1;
 int g_moves = 0;
@@ -635,6 +638,43 @@ bool verifyAllowed() {
 	return g_vshift <= partner.maxShift;
 }
 
+void clearRecording() {
+	g_tmpBase.clear();
+	g_tmpStart = -1;
+	g_tmpMatch.clear();
+}
+
+void commitRecording() {
+	if (g_tmpStart < 0) {
+		return;
+	}
+	for (size_t i = 0; i < g_tmpBase.size(); i++) {
+		size_t t = (size_t)g_tmpStart + i;
+		if (t < g_baseline.size()) {
+			g_baseline[t] = g_tmpBase[i];
+		} else {
+			g_baseline.push_back(g_tmpBase[i]);
+		}
+	}
+	int kept = 0;
+	int lost = 0;
+	for (size_t i = 0; i < g_cpTick.size() && i < g_cpOk.size(); i++) {
+		if (g_cpTick[i] < g_tmpStart) {
+			continue;
+		}
+		bool matched = g_tmpMatch.count((int)i) > 0 && g_tmpMatch[(int)i];
+		if (g_cpOk[i] && !matched) {
+			g_cpOk[i] = false;
+			lost++;
+		}
+		if (g_cpOk[i]) {
+			kept++;
+		}
+	}
+	g_log << "new path from " << g_tmpStart << ", checkpoints kept " << kept << " lost " << lost << "\n";
+	clearRecording();
+}
+
 void prepareVerify() {
 	Click c = g_clicks[g_clickIndex];
 	int p = -1;
@@ -693,6 +733,7 @@ void verifyAfter(bool ok) {
 			}
 		}
 		g_moves++;
+		commitRecording();
 		g_log << "move input " << g_clickIndex << " by " << g_vshift << "\n";
 		g_verifying = false;
 		goNextClick();
@@ -969,6 +1010,7 @@ void collapseAfter(bool ok) {
 	if (ok) {
 		g_original = collapsedInputs();
 		g_collapseCount++;
+		commitRecording();
 	}
 	collapseNext();
 }
@@ -1198,6 +1240,11 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 			if (!found) {
 				g_tickOffset = -1;
 				g_log << "offset not found after cp " << g_loadCp << " raw " << raw << "\n";
+				if (g_phase != -2 && g_loadCp >= 0 && g_loadCp < (int)g_cpOk.size()) {
+					g_cpOk[g_loadCp] = false;
+					g_trialDone = true;
+					requestReset();
+				}
 			}
 			if (g_phase == -2) {
 				g_log << "offset after cp raw " << raw << " offset " << g_tickOffset << "\n";
@@ -1239,6 +1286,19 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 						g_cpArray->addObject(cp);
 						g_cpTick.push_back(tick);
 						g_nextCpTick = tick + CP_EVERY;
+					}
+				}
+			}
+			if (g_mode == 2 && (g_verifying || g_phase == -1) && !g_trialDone) {
+				if (g_tmpStart < 0) {
+					g_tmpStart = tick;
+				}
+				while ((int)g_tmpBase.size() <= tick - g_tmpStart) {
+					g_tmpBase.push_back(now);
+				}
+				for (size_t k = 0; k < g_cpTick.size(); k++) {
+					if (g_cpTick[k] == tick && tick < (int)g_baseline.size()) {
+						g_tmpMatch[(int)k] = sameState(now, g_baseline[tick]);
 					}
 				}
 			}
@@ -1320,6 +1380,7 @@ class $modify(MyPlayLayer, PlayLayer) {
 		g_next = 0;
 		g_trialDone = false;
 		g_tickOffset = 0;
+		clearRecording();
 		g_findOffset = false;
 		if (useCp) {
 			g_findOffset = true;
@@ -1377,6 +1438,7 @@ class $modify(MyPlayLayer, PlayLayer) {
 
 	void onQuit() {
 		clearCheckpoints();
+		clearRecording();
 		if (m_checkpointArray) {
 			m_checkpointArray->removeAllObjects();
 		}
