@@ -76,6 +76,8 @@ bool g_block = false;
 cocos2d::CCArray* g_cpArray = nullptr;
 std::vector<int> g_cpTick;
 std::vector<bool> g_cpOk;
+std::vector<int> g_cpUntil;
+int g_cpLastGood = -1;
 int g_loadCp = -1;
 size_t g_cpTest = 0;
 int g_cpFirstTick = -1;
@@ -660,11 +662,20 @@ void commitRecording() {
 	int lost = 0;
 	for (size_t i = 0; i < g_cpTick.size() && i < g_cpOk.size(); i++) {
 		if (g_cpTick[i] < g_tmpStart) {
+			if (!g_cpOk[i] && i < g_cpUntil.size()) {
+				g_cpUntil[i] = std::min(g_cpUntil[i], g_tmpStart);
+			}
 			continue;
 		}
 		bool matched = g_tmpMatch.count((int)i) > 0 && g_tmpMatch[(int)i];
+		if (!g_cpOk[i] && i < g_cpUntil.size()) {
+			g_cpUntil[i] = -1;
+		}
 		if (g_cpOk[i] && !matched) {
 			g_cpOk[i] = false;
+			if (i < g_cpUntil.size()) {
+				g_cpUntil[i] = -1;
+			}
 			lost++;
 		}
 		if (g_cpOk[i]) {
@@ -1037,9 +1048,14 @@ int firstChange() {
 
 int pickCheckpoint() {
 	int change = firstChange();
+	int need = 1000000000;
+	if (g_limit >= 0) {
+		need = g_limit + 2;
+	}
 	int best = -1;
 	for (size_t i = 0; i < g_cpTick.size() && i < g_cpOk.size(); i++) {
-		if (g_cpOk[i] && g_cpTick[i] <= change - 2) {
+		bool usable = g_cpOk[i] || (i < g_cpUntil.size() && g_cpUntil[i] > need);
+		if (usable && g_cpTick[i] <= change - 2) {
 			best = (int)i;
 		}
 	}
@@ -1053,6 +1069,7 @@ void clearCheckpoints() {
 	}
 	g_cpTick.clear();
 	g_cpOk.clear();
+	g_cpUntil.clear();
 	g_loadCp = -1;
 	g_held[0] = false;
 	g_held[1] = false;
@@ -1064,6 +1081,7 @@ void prepareCpTest() {
 	g_inputs = g_original;
 	g_loadCp = (int)g_cpTest;
 	g_cpFirstTick = -1;
+	g_cpLastGood = -1;
 	g_limit = -1;
 	g_checkFrom = 1000000000;
 }
@@ -1072,6 +1090,7 @@ void startTrials();
 
 void startCpTest() {
 	g_cpOk.assign(g_cpTick.size(), false);
+	g_cpUntil.assign(g_cpTick.size(), -1);
 	g_log << "checkpoints " << g_cpTick.size() << "\n";
 	g_log.flush();
 	if (g_cpTick.empty()) {
@@ -1087,21 +1106,25 @@ void startCpTest() {
 
 void cpTestAfter(bool ok) {
 	g_cpOk[g_cpTest] = ok;
-	g_log << "cp test " << g_cpTest << " tick " << g_cpTick[g_cpTest] << " ok " << ok << "\n";
+	g_cpUntil[g_cpTest] = ok ? 1000000000 : g_cpLastGood;
+	g_log << "cp test " << g_cpTest << " tick " << g_cpTick[g_cpTest] << " ok " << ok << " until " << g_cpUntil[g_cpTest] << "\n";
 	g_cpTest++;
 	if (g_cpTest < g_cpTick.size()) {
 		prepareCpTest();
 		return;
 	}
 	int good = 0;
+	int partial = 0;
 	for (size_t i = 0; i < g_cpOk.size(); i++) {
 		if (g_cpOk[i]) {
 			good++;
+		} else if (g_cpUntil[i] > g_cpTick[i] + CP_TEST_TICKS) {
+			partial++;
 		}
 	}
-	g_log << "checkpoints ok " << good << " of " << g_cpOk.size() << "\n";
+	g_log << "checkpoints ok " << good << " partial " << partial << " of " << g_cpOk.size() << "\n";
 	g_log.flush();
-	Notification::create(fmt::format("Checkpoints OK: {}/{}", good, g_cpOk.size()), NotificationIcon::Info)->show();
+	Notification::create(fmt::format("Checkpoints OK: {}/{}, partial {}", good, g_cpOk.size(), partial), NotificationIcon::Info)->show();
 	g_loadCp = -1;
 	startTrials();
 }
@@ -1240,8 +1263,16 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 			if (!found) {
 				g_tickOffset = -1;
 				g_log << "offset not found after cp " << g_loadCp << " raw " << raw << "\n";
+				if (raw - 1 >= 0 && raw - 1 < (int)g_baseline.size()) {
+					State b = g_baseline[raw - 1];
+					g_log << "  now x " << first.x1 << " y " << first.y1 << " vel " << first.vel1 << " flags " << first.flags1 << " p2 x " << first.x2 << " y " << first.y2 << " vel " << first.vel2 << " flags " << first.flags2 << "\n";
+					g_log << "  base x " << b.x1 << " y " << b.y1 << " vel " << b.vel1 << " flags " << b.flags1 << " p2 x " << b.x2 << " y " << b.y2 << " vel " << b.vel2 << " flags " << b.flags2 << "\n";
+				}
 				if (g_phase != -2 && g_loadCp >= 0 && g_loadCp < (int)g_cpOk.size()) {
 					g_cpOk[g_loadCp] = false;
+					if (g_loadCp < (int)g_cpUntil.size()) {
+						g_cpUntil[g_loadCp] = -1;
+					}
 					g_trialDone = true;
 					requestReset();
 				}
@@ -1279,6 +1310,15 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 				if (tick >= g_nextCpTick && !g_held[0] && !g_held[1] && tick - g_lastInputTick >= 2 && nextInput - tick >= 2) {
 					auto cp = pl->createCheckpoint();
 					if (cp) {
+						if (m_gameState.m_isDualMode) {
+							g_log << "cp at " << tick << " dual, p2 checkpoint " << (cp->m_player2Checkpoint != nullptr) << "\n";
+							if (!cp->m_player2Checkpoint) {
+								auto pc = PlayerCheckpoint::create();
+								pc->retain();
+								m_player2->saveToCheckpoint(pc);
+								cp->m_player2Checkpoint = pc;
+							}
+						}
 						if (!g_cpArray) {
 							g_cpArray = cocos2d::CCArray::create();
 							g_cpArray->retain();
@@ -1311,8 +1351,16 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 				}
 				if (tick > start && (tick - start) % CP_TEST_TICKS == 0) {
 					bool ok = tick < (int)g_baseline.size() && sameState(now, g_baseline[tick]);
+					if (ok) {
+						g_cpLastGood = tick;
+					}
 					if (!ok) {
 						g_log << "cp " << g_cpTest << " differs at " << tick << "\n";
+						if (tick < (int)g_baseline.size()) {
+							State b = g_baseline[tick];
+							g_log << "  now x " << now.x1 << " y " << now.y1 << " vel " << now.vel1 << " flags " << now.flags1 << " p2 x " << now.x2 << " y " << now.y2 << " flags " << now.flags2 << "\n";
+							g_log << "  base x " << b.x1 << " y " << b.y1 << " vel " << b.vel1 << " flags " << b.flags1 << " p2 x " << b.x2 << " y " << b.y2 << " flags " << b.flags2 << "\n";
+						}
 						finishTrial(false);
 					}
 				}
@@ -1369,6 +1417,22 @@ class $modify(MyPlayLayer, PlayLayer) {
 			}
 		}
 		PlayLayer::resetLevel();
+		if (useCp) {
+			auto cp = static_cast<CheckpointObject*>(g_cpArray->objectAtIndex(g_loadCp));
+			if (cp->m_gameState.m_isDualMode && cp->m_player2Checkpoint) {
+				float before = m_player2->getPositionX();
+				bool dual = m_gameState.m_isDualMode;
+				bool visible = m_player2->isVisible();
+				if (!closeEnough(before, cp->m_player2Checkpoint->m_position.x)) {
+					m_gameState.m_isDualMode = true;
+					m_player2->loadFromCheckpoint(cp->m_player2Checkpoint);
+					m_player2->setVisible(true);
+				}
+				if (g_phase == -2) {
+					g_log << "p2 restore cp " << g_loadCp << " dual " << dual << " visible " << visible << " before x " << before << " cp x " << cp->m_player2Checkpoint->m_position.x << " after x " << m_player2->getPositionX() << " y " << m_player2->getPositionY() << "\n";
+				}
+			}
+		}
 		if (g_mode != 0 && m_checkpointArray) {
 			m_checkpointArray->removeAllObjects();
 			m_isPracticeMode = false;
