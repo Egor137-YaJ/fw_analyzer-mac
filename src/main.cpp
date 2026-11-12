@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cmath>
+#include <chrono>
 #include <gdr/gdr.hpp>
 
 using namespace geode::prelude;
@@ -77,6 +78,23 @@ cocos2d::CCArray* g_cpArray = nullptr;
 std::vector<int> g_cpTick;
 std::vector<bool> g_cpOk;
 std::vector<int> g_cpUntil;
+std::chrono::steady_clock::time_point g_profStart;
+bool g_profOn = false;
+int g_profFrames = 0;
+int g_profTicks = 0;
+int g_profTrials = 0;
+int g_profResets = 0;
+double g_profReset = 0;
+double g_profUpdate = 0;
+double g_profDt = 0;
+double g_profLoad = 0;
+double g_loadCost = 0.03;
+double g_tickCost = 0.0000025;
+double g_sumLoad = 0;
+double g_numLoad = 0;
+double g_sumPhys = 0;
+double g_sumTicks = 0;
+const float STEP_DT = 1.0f;
 int g_cpLastGood = -1;
 int g_loadCp = -1;
 size_t g_cpTest = 0;
@@ -312,12 +330,61 @@ void setSpeed(float speed) {
 	CCDirector::get()->getScheduler()->setTimeScale(speed);
 }
 
+double secondsSince(std::chrono::steady_clock::time_point t) {
+	return std::chrono::duration<double>(std::chrono::steady_clock::now() - t).count();
+}
+
+void profReport() {
+	if (!g_profOn) {
+		g_profStart = std::chrono::steady_clock::now();
+		g_profOn = true;
+		return;
+	}
+	double wall = secondsSince(g_profStart);
+	if (wall < 10.0) {
+		return;
+	}
+	g_log << "speed: fps " << g_profFrames / wall;
+	g_log << " ticks/s " << g_profTicks / wall;
+	g_log << " trials/s " << g_profTrials / wall;
+	if (g_profFrames > 0) {
+		g_log << " ticks/frame " << (double)g_profTicks / g_profFrames;
+		g_log << " dt " << g_profDt / g_profFrames;
+	}
+	if (g_profTrials > 0) {
+		g_log << " frames/trial " << (double)g_profFrames / g_profTrials;
+	}
+	if (g_profResets > 0) {
+		g_log << " reset ms " << g_profReset * 1000.0 / g_profResets;
+	}
+	if (g_profResets > 0) {
+		g_log << " load ms " << g_profLoad * 1000.0 / g_profResets;
+	}
+	g_log << " update " << (int)(g_profUpdate * 100.0 / wall) << "%";
+	g_log << " reset " << (int)(g_profReset * 100.0 / wall) << "%";
+	g_log << " load cost ms " << g_loadCost * 1000.0 << " tick cost us " << g_tickCost * 1000000.0;
+	g_log << " timescale " << CCDirector::get()->getScheduler()->getTimeScale() << "\n";
+	g_log.flush();
+	g_profStart = std::chrono::steady_clock::now();
+	g_profFrames = 0;
+	g_profTicks = 0;
+	g_profTrials = 0;
+	g_profResets = 0;
+	g_profReset = 0;
+	g_profUpdate = 0;
+	g_profDt = 0;
+	g_profLoad = 0;
+}
+
 void requestReset() {
 	if (g_resetQueued) {
 		return;
 	}
 	g_resetQueued = true;
 	geode::queueInMainThread([]() {
+		if (!g_resetQueued) {
+			return;
+		}
 		g_resetQueued = false;
 		if (auto pl = PlayLayer::get()) {
 			pl->resetLevel();
@@ -1065,6 +1132,9 @@ int pickCheckpoint() {
 			best = (int)i;
 		}
 	}
+	if (best >= 0 && g_cpTick[best] * g_tickCost < g_loadCost) {
+		best = -1;
+	}
 	return best;
 }
 
@@ -1140,6 +1210,7 @@ void finishTrial(bool ok) {
 		return;
 	}
 	g_trialDone = true;
+	g_profTrials++;
 	if (g_phase == -2) {
 		cpTestAfter(ok);
 	} else if (g_phase == -1) {
@@ -1246,7 +1317,40 @@ class $modify(MyMenuLayer, MenuLayer) {
 };
 
 class $modify(MyBaseLayer, GJBaseGameLayer) {
+	void update(float dt) {
+		if (g_mode == 0) {
+			GJBaseGameLayer::update(dt);
+			return;
+		}
+		auto start = std::chrono::steady_clock::now();
+		if (g_mode != 2) {
+			GJBaseGameLayer::update(dt);
+		}
+		while (g_mode == 2 && PlayLayer::get() && secondsSince(start) < 0.05) {
+			if (g_resetQueued) {
+				g_resetQueued = false;
+				PlayLayer::get()->resetLevel();
+			}
+			auto stepStart = std::chrono::steady_clock::now();
+			GJBaseGameLayer::update(STEP_DT);
+			g_sumPhys += secondsSince(stepStart);
+		}
+		if (g_sumTicks > 10000) {
+			g_tickCost = g_sumPhys / g_sumTicks;
+		}
+		g_profUpdate += secondsSince(start);
+		g_profFrames++;
+		g_profDt += dt;
+		profReport();
+	}
+
 	void processQueuedButtons(float dt, bool clearInputQueue) {
+		if (g_mode != 0) {
+			g_profTicks++;
+		}
+		if (g_mode == 2) {
+			g_sumTicks++;
+		}
 		if (g_mode != 0 && PlayLayer::get() && g_waitStart) {
 			if (m_gameState.m_currentProgress / 2 <= 2) {
 				g_waitStart = false;
@@ -1392,6 +1496,26 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 };
 
 class $modify(MyPlayLayer, PlayLayer) {
+	void startMusic() {
+		if (g_mode == 0) {
+			PlayLayer::startMusic();
+		}
+	}
+
+	void loadFromCheckpoint(CheckpointObject* cp) {
+		if (g_mode == 0) {
+			PlayLayer::loadFromCheckpoint(cp);
+			return;
+		}
+		auto start = std::chrono::steady_clock::now();
+		PlayLayer::loadFromCheckpoint(cp);
+		double t = secondsSince(start);
+		g_profLoad += t;
+		g_sumLoad += t;
+		g_numLoad++;
+		g_loadCost = g_sumLoad / g_numLoad;
+	}
+
 	void resetLevel() {
 		g_waitStart = true;
 		if (g_mode == 1) {
@@ -1413,12 +1537,17 @@ class $modify(MyPlayLayer, PlayLayer) {
 				m_isPracticeMode = true;
 			}
 		}
+		auto resetStart = std::chrono::steady_clock::now();
 		PlayLayer::resetLevel();
+		if (g_mode != 0) {
+			g_profReset += secondsSince(resetStart);
+			g_profResets++;
+		}
 		if (g_mode != 0 && m_checkpointArray) {
 			m_checkpointArray->removeAllObjects();
 			m_isPracticeMode = false;
 		}
-		if (g_mode == 2) {
+		if (g_mode != 0) {
 			setSpeed((float)Mod::get()->getSettingValue<double>("speed"));
 		}
 
