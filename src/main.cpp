@@ -58,6 +58,26 @@ bool g_relAllOk = true;
 bool g_relTested = false;
 const int RELEVANCE_TICKS = 120;
 std::vector<int> g_windows;
+const int CORR_DEPTH = 3;
+const int CORR_BEAM = 3;
+const int CORR_MAX_TRIALS = 80;
+std::vector<int> g_chain;
+std::vector<int> g_chainFirst;
+int g_chainAfter = -1;
+int g_iFirst = 0;
+int g_afterFirst = -1;
+size_t g_rangeLo = 0;
+size_t g_rangeHi = 0;
+std::vector<int> g_order;
+std::vector<std::vector<int>> g_queue;
+size_t g_qPos = 0;
+std::vector<int> g_cur;
+int g_level = 0;
+std::vector<std::vector<int>> g_failVec;
+std::vector<int> g_failDeath;
+int g_shiftTrials = 0;
+int g_deathTick = 1000000000;
+std::vector<bool> g_noopInput;
 std::vector<State> g_baseline;
 size_t g_clickIndex = 0;
 int g_shift = 0;
@@ -455,7 +475,245 @@ Click currentClick() {
 	return c;
 }
 
+bool inClick(int clickIndex, size_t input) {
+	if (clickIndex < 0) {
+		return false;
+	}
+	std::vector<size_t>& idx = g_clicks[clickIndex].idx;
+	return std::find(idx.begin(), idx.end(), input) != idx.end();
+}
+
+int firstFrameOf(int clickIndex) {
+	int f = -1;
+	std::vector<size_t>& idx = g_clicks[clickIndex].idx;
+	for (size_t k = 0; k < idx.size(); k++) {
+		int x = (int)g_original[idx[k]].frame;
+		if (f < 0 || x < f) {
+			f = x;
+		}
+	}
+	return f;
+}
+
+void buildChain() {
+	g_chain.clear();
+	g_chainFirst.clear();
+	int j = partnerOf(g_clickIndex);
+	while (j >= 0 && (int)g_chain.size() < CORR_DEPTH) {
+		g_chain.push_back(j);
+		g_chainFirst.push_back(firstFrameOf(j));
+		j = partnerOf((size_t)j);
+	}
+	g_chainAfter = j;
+	g_iFirst = firstFrameOf((int)g_clickIndex);
+	g_afterFirst = -1;
+	if (j >= 0) {
+		g_afterFirst = firstFrameOf(j);
+	}
+	int fromFrame = g_iFirst - 2 * MAX_SHIFT - 2;
+	int toFrame = 1000000000;
+	if (g_afterFirst >= 0) {
+		toFrame = g_afterFirst + 2 * MAX_SHIFT + 2;
+	}
+	g_rangeLo = 0;
+	while (g_rangeLo + 1 < g_original.size() && (int)g_original[g_rangeLo].frame < fromFrame) {
+		g_rangeLo++;
+	}
+	g_rangeHi = g_rangeLo;
+	while (g_rangeHi + 1 < g_original.size() && (int)g_original[g_rangeHi + 1].frame <= toFrame) {
+		g_rangeHi++;
+	}
+}
+
+int shiftOfInput(size_t input, std::vector<int>& corr) {
+	if (g_original[input].player2 != g_clicks[g_clickIndex].p2) {
+		return 0;
+	}
+	if (inClick((int)g_clickIndex, input)) {
+		return g_shift;
+	}
+	for (size_t m = 0; m < g_chain.size(); m++) {
+		if (inClick(g_chain[m], input)) {
+			if (m < corr.size()) {
+				return corr[m];
+			}
+			return 0;
+		}
+	}
+	if (input >= g_noopInput.size() || !g_noopInput[input]) {
+		return 0;
+	}
+	int f = (int)g_original[input].frame;
+	if (f <= g_iFirst) {
+		return 0;
+	}
+	if (g_afterFirst >= 0 && f >= g_afterFirst) {
+		return 0;
+	}
+	int result = g_shift;
+	for (size_t m = 0; m < g_chain.size(); m++) {
+		if (f > g_chainFirst[m]) {
+			result = 0;
+			if (m < corr.size()) {
+				result = corr[m];
+			}
+		}
+	}
+	return result;
+}
+
+bool orderKept(std::vector<int>& corr) {
+	bool p2 = g_clicks[g_clickIndex].p2;
+	int prevOld = -1;
+	int prevNew = -1;
+	for (size_t k = g_rangeLo; k <= g_rangeHi && k < g_original.size(); k++) {
+		if (g_original[k].player2 != p2) {
+			continue;
+		}
+		int oldFrame = (int)g_original[k].frame;
+		int newFrame = oldFrame + shiftOfInput(k, corr);
+		if (newFrame < 1) {
+			return false;
+		}
+		if (prevOld >= 0) {
+			if (oldFrame > prevOld && newFrame <= prevNew) {
+				return false;
+			}
+			if (oldFrame == prevOld && newFrame < prevNew) {
+				return false;
+			}
+		}
+		prevOld = oldFrame;
+		prevNew = newFrame;
+	}
+	return true;
+}
+
+void buildOrder() {
+	g_order.clear();
+	for (int d = 0; d <= 2 * MAX_SHIFT; d++) {
+		for (int sign = -1; sign <= 1; sign += 2) {
+			if (d == 0 && sign == 1) {
+				continue;
+			}
+			int c = g_shift + d * sign;
+			if (c != 0 && c >= -MAX_SHIFT && c <= MAX_SHIFT) {
+				g_order.push_back(c);
+			}
+		}
+	}
+}
+
+bool startShift() {
+	g_queue.clear();
+	g_qPos = 0;
+	g_failVec.clear();
+	g_failDeath.clear();
+	g_shiftTrials = 0;
+	g_level = 0;
+	buildOrder();
+	std::vector<int> none;
+	if (orderKept(none)) {
+		g_queue.push_back(none);
+		return true;
+	}
+	if (g_chain.empty()) {
+		return false;
+	}
+	g_level = 1;
+	for (size_t q = 0; q < g_order.size(); q++) {
+		std::vector<int> v;
+		v.push_back(g_order[q]);
+		if (orderKept(v)) {
+			g_queue.push_back(v);
+		}
+	}
+	return !g_queue.empty();
+}
+
+bool nextLevel() {
+	g_queue.clear();
+	g_qPos = 0;
+	g_level++;
+	if (g_level > (int)g_chain.size()) {
+		return false;
+	}
+	int jFrame = g_chainFirst[g_level - 1];
+	std::vector<bool> taken(g_failVec.size(), false);
+	for (int b = 0; b < CORR_BEAM; b++) {
+		int best = -1;
+		for (size_t f = 0; f < g_failVec.size(); f++) {
+			if (taken[f] || (int)g_failVec[f].size() >= g_level) {
+				continue;
+			}
+			if (g_failDeath[f] < jFrame - MAX_SHIFT) {
+				continue;
+			}
+			if (best < 0 || g_failDeath[f] > g_failDeath[best]) {
+				best = (int)f;
+			}
+		}
+		if (best < 0) {
+			break;
+		}
+		taken[best] = true;
+		std::vector<int> parent = g_failVec[best];
+		while ((int)parent.size() < g_level - 1) {
+			parent.push_back(0);
+		}
+		for (size_t q = 0; q < g_order.size(); q++) {
+			int c = g_order[q];
+			if (jFrame + c > g_failDeath[best]) {
+				continue;
+			}
+			std::vector<int> v = parent;
+			v.push_back(c);
+			if (orderKept(v)) {
+				g_queue.push_back(v);
+			}
+		}
+	}
+	return !g_queue.empty();
+}
+
+void prepareCorrTrial() {
+	g_cur = g_queue[g_qPos];
+	g_inputs = g_original;
+	int last = 0;
+	int maxAbs = std::abs(g_shift);
+	for (size_t k = g_rangeLo; k <= g_rangeHi && k < g_original.size(); k++) {
+		int sh = shiftOfInput(k, g_cur);
+		if (sh != 0) {
+			int f = (int)g_original[k].frame;
+			g_inputs[k].frame += sh;
+			last = std::max(last, std::max(f, f + sh));
+		}
+	}
+	for (size_t m = 0; m < g_cur.size(); m++) {
+		maxAbs = std::max(maxAbs, std::abs(g_cur[m]));
+	}
+	int frame = (int)g_original[g_clicks[g_clickIndex].main].frame;
+	g_isWave = waveAt(frame);
+	std::stable_sort(g_inputs.begin(), g_inputs.end(), sortByFrame);
+	g_checkFrom = last + 2;
+	g_limit = -1;
+	if (g_afterFirst >= 0) {
+		g_limit = g_afterFirst - 1 - maxAbs;
+		g_limit = std::max(g_limit, last + 2);
+		if (!g_isWave) {
+			g_limit = std::max(g_limit, frame + std::abs(g_shift) + MIN_HORIZON);
+		}
+	}
+	g_deathTick = 1000000000;
+	g_trials++;
+	g_shiftTrials++;
+}
+
 void prepareTrial() {
+	if (!g_human) {
+		prepareCorrTrial();
+		return;
+	}
 	if (g_block) {
 		Click block = currentClick();
 		block.nextFrame = -1;
@@ -675,6 +933,21 @@ void finishAnalysis() {
 }
 
 bool shiftAllowed() {
+	if (!g_human) {
+		if (g_shift < -MAX_SHIFT || g_shift > MAX_SHIFT) {
+			return false;
+		}
+		buildChain();
+		bool started = startShift();
+		if (!started) {
+			std::vector<int> none;
+			g_log << "click " << g_clickIndex << " shift " << g_shift << " not allowed, order " << orderKept(none) << " chain " << g_chain.size() << " range " << g_rangeLo << "-" << g_rangeHi << "\n";
+			for (size_t k = g_rangeLo; k <= g_rangeHi && k < g_original.size(); k++) {
+				g_log << "  input " << k << " frame " << g_original[k].frame << " down " << g_original[k].down << " p2 " << g_original[k].player2 << " button " << (int)g_original[k].button << " shift " << shiftOfInput(k, none) << "\n";
+			}
+		}
+		return started;
+	}
 	Click c = currentClick();
 	return g_shift >= c.minShift && g_shift <= c.maxShift && g_shift >= -MAX_SHIFT && g_shift <= MAX_SHIFT;
 }
@@ -872,6 +1145,28 @@ void goNextClick() {
 }
 
 void advanceAfter(bool ok) {
+	if (!g_human && !ok) {
+		g_failVec.push_back(g_cur);
+		g_failDeath.push_back(g_deathTick);
+		g_qPos++;
+		if (g_shiftTrials < CORR_MAX_TRIALS) {
+			if (g_qPos < g_queue.size()) {
+				prepareTrial();
+				return;
+			}
+			if (nextLevel()) {
+				prepareTrial();
+				return;
+			}
+		}
+	}
+	if (!g_human && ok && !g_cur.empty()) {
+		g_log << "click " << g_clickIndex << " shift " << g_shift << " ok with corrections";
+		for (size_t m = 0; m < g_cur.size(); m++) {
+			g_log << " " << g_cur[m];
+		}
+		g_log << "\n";
+	}
 	if (ok) {
 		if (g_dir == -1) {
 			g_lo = g_shift;
@@ -895,9 +1190,13 @@ void advanceAfter(bool ok) {
 void startWindowPhase() {
 	g_phase = 1;
 	g_clicks.clear();
+	g_noopInput.assign(g_original.size(), true);
 	for (size_t i = 0; i < g_events.size(); i++) {
 		if (!g_noop[i]) {
 			g_clicks.push_back(g_events[i]);
+			for (size_t k = 0; k < g_events[i].idx.size(); k++) {
+				g_noopInput[g_events[i].idx[k]] = false;
+			}
 		}
 	}
 	for (size_t i = 0; i < g_clicks.size(); i++) {
@@ -1264,12 +1563,44 @@ void startWindowsAfterCollapse() {
 	}
 }
 
+void writePath() {
+	std::ofstream f(outDir() / (g_name + "_path.txt"), std::ios::out | std::ios::trunc);
+	for (size_t i = 0; i < g_baseline.size(); i++) {
+		State b = g_baseline[i];
+		f << i << " " << b.x1 << " " << b.y1 << " " << b.flags1 << " " << b.x2 << " " << b.y2 << " " << b.flags2 << "\n";
+	}
+}
+
+void writeCatalog() {
+	auto path = outDir() / "gd_objects.txt";
+	if (std::filesystem::exists(path)) {
+		return;
+	}
+	std::ofstream f(path, std::ios::out | std::ios::trunc);
+	auto toolbox = ObjectToolbox::sharedState();
+	for (int id = 1; id <= 5000; id++) {
+		const char* frame = toolbox->intKeyToFrame(id);
+		if (!frame || !frame[0]) {
+			continue;
+		}
+		auto o = GameObject::createWithKey(id);
+		if (!o) {
+			f << id << " " << frame << " -1 0 0\n";
+			continue;
+		}
+		auto size = o->getContentSize();
+		f << id << " " << frame << " " << (int)o->m_objectType << " " << size.width << " " << size.height << "\n";
+		f.flush();
+	}
+}
+
 void levelEnded() {
 	if (g_trialDone) {
 		return;
 	}
 	if (g_mode == 1) {
 		g_trialDone = true;
+		writePath();
 		Notification::create("Baseline OK, starting analysis", NotificationIcon::Success)->show();
 		setSpeed((float)Mod::get()->getSettingValue<double>("speed"));
 		startCpTest();
@@ -1293,6 +1624,7 @@ class $modify(MyMenuLayer, MenuLayer) {
 		);
 		menu->addChild(btn);
 		menu->updateLayout();
+		writeCatalog();
 
 		return true;
 	}
@@ -1470,7 +1802,7 @@ class $modify(MyBaseLayer, GJBaseGameLayer) {
 				g_log << "base tick " << tick << " percent " << pl->getCurrentPercent() << " x " << now.x1 << " end " << pl->m_levelEndAnimationStarted << "\n";
 				g_log.flush();
 			}
-			if (pl->m_levelEndAnimationStarted || pl->getCurrentPercent() >= 100.0f) {
+			if (pl->m_levelEndAnimationStarted) {
 				g_log << "end detected tick " << tick << "\n";
 				levelEnded();
 			}
@@ -1581,6 +1913,7 @@ class $modify(MyPlayLayer, PlayLayer) {
 			PlayLayer::destroyPlayer(player, object);
 			return;
 		}
+		g_deathTick = m_gameState.m_currentProgress / 2 + g_tickOffset;
 		g_log << "trial click " << g_clickIndex << " shift " << g_shift << " died at " << m_gameState.m_currentProgress / 2 << "\n";
 		finishTrial(false);
 	}
